@@ -3,10 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RailPulse Challenge Azure</title>
+    <title>RailPulse Dashboard</title>
 </head>
 <body>
-    <h1>Welcome to RailPulse Challenge Azure</h1>
-    <p>My site is under construction.</p>
+    <h1>RailPulse Liveboard Dashboard</h1>
+    <div id="dashboard-content">uploading data...</div>
+
+    <script>
+        fetch('https://railpulse-liveboard-func-flex311.azurewebsites.net/api/dashboard')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('dashboard-content').innerHTML = 
+                    `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            })
+            .catch(error => {
+                document.getElementById('dashboard-content').innerHTML = 
+                    "Erreur lors du chargement des données de l'API.";
+                console.error('Erreur:', error);
+            });
+    </script>
 </body>
 </html>
