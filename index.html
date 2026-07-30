@@ -4,31 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RailPulse Dashboard</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+    </style>
 </head>
 <body>
-    <h1>RailPulse Liveboard Dashboard</h1>
-    <div id="dashboard-content">Loading data...</div>
-
-    <script>
-        fetch('https://railpulse-liveboard-func-flex311.azurewebsites.net/api/dashboard')
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error("HTTP error: " + response.status);
-                }
-                return response.text();
-            })
-            .then(text => {
-                try {
-                    const data = JSON.parse(text);
-                    document.getElementById('dashboard-content').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
-                } catch (e) {
-                    document.getElementById('dashboard-content').innerHTML = `<pre>${text}</pre>`;
-                }
-            })
-            .catch(error => {
-                document.getElementById('dashboard-content').innerHTML = "Error loading data from the API.";
-                console.error('Error:', error);
-            });
-    </script>
+    <iframe src="https://railpulse-liveboard-func-flex311.azurewebsites.net/api/dashboard"></iframe>
 </body>
 </html>
