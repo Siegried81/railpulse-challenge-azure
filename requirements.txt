@@ -1,0 +1,5 @@
+azure-functions
+requests
+pyodbc
+werkzeug
+matplotlib

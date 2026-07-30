@@ -1,0 +1,41 @@
+# Local settings and development environments
+local.settings.json
+.venv/
+.venv/**
+.python_packages
+.python_packages/**
+__pycache__
+__pycache__/**
+*.py[cod]
+
+# Repository and editor metadata
+.git
+.git/**
+.github
+.github/**
+.vscode
+.vscode/**
+.idea
+.idea/**
+
+# Local data, documentation, and analysis assets not used by the Function App
+data
+data/**
+docs
+docs/**
+scripts
+scripts/**
+sql
+sql/**
+src
+src/**
+*.db
+*.sqlite*
+*.log
+
+# Local secrets and environment files
+.env
+.env.*
+*credentials*
+*secret*
+*password*

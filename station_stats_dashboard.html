@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RailPulse — Live Network Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #081120;
+    --bg-soft: #0f172a;
+    --card: #172034;
+    --card-alt: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-strong: #f59e0b;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 30%),
+      radial-gradient(circle at bottom right, rgba(245, 158, 11, 0.12), transparent 26%),
+      var(--bg);
+    color: var(--text);
+    margin: 0;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+
+  .page {
+    max-width: 1240px;
+    margin: 0 auto;
+  }
+
+  .hero {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  h1 {
+    font-size: clamp(1.6rem, 3vw, 2.4rem);
+    margin: 0;
+    letter-spacing: -0.03em;
+  }
+
+  .hero p {
+    margin: 0.4rem 0 0;
+    color: var(--muted);
+    max-width: 60ch;
+    font-size: 0.9rem;
+  }
+
+  #status {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin: 0;
+    text-align: right;
+  }
+
+  #status.error {
+    color: #f87171;
+  }
+
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .card {
+    background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 18px;
+    padding: 1.25rem;
+    box-shadow: 0 22px 48px rgba(2, 6, 23, 0.35);
+    overflow: hidden;
+  }
+
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .card h2 {
+    margin: 0;
+    font-size: 1rem;
+    color: #f8fafc;
+  }
+
+  .subtitle-note {
+    font-size: 0.85rem;
+    color: var(--muted);
+    font-weight: normal;
+  }
+
+  .chart-wrap {
+    min-height: 520px;
+  }
+
+  .chart-wrap canvas {
+    width: 100% !important;
+    height: 460px !important;
+  }
+
+  @media (max-width: 980px) {
+    .hero {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    #status {
+      text-align: left;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="hero">
+      <div>
+        <h1>🚉 RailPulse — Live Network Dashboard</h1>
+        <p>Live station activity and leaderboard, pulled from Azure SQL.</p>
+      </div>
+      <div id="status">Loading...</div>
+    </div>
+
+    <div class="stack">
+      <section class="card">
+        <div class="card-head">
+          <h2>Top 5 Most Active Stations</h2>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart"></canvas>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Major Hubs Leaderboard — On-time departures <span class="subtitle-note">(threshold: 60s; average delay shown)</span></h2>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="leaderboardChart"></canvas>
+        </div>
+      </section>
+    </div>
+  </div>
+
+<script>
+  Chart.register(ChartDataLabels);
+
+  // Absolute URL on purpose: this makes the page work identically whether
+  // it's opened via file://, served locally with `python -m http.server`,
+  // or served by the Function App itself at /api/dashboard. CORS is already
+  // open (Access-Control-Allow-Origin: *) on the API side, so the page's
+  // own origin never matters.
+  const BASE_API = "https://railpulse-liveboard-func-flex311.azurewebsites.net";
+  const API_URL = `${BASE_API}/api/station-stats`;
+  const LEADERBOARD_API_URL = `${BASE_API}/api/network-leaderboard`;
+  const REFRESH_INTERVAL_MS = 30000;
+
+  const ctx = document.getElementById('chart').getContext('2d');
+  const ctxLeaderboard = document.getElementById('leaderboardChart').getContext('2d');
+  const statusEl = document.getElementById('status');
+
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Record Count',
+        data: [],
+        backgroundColor: '#38bdf8',
+        borderRadius: 6
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          color: '#ffffff',
+          anchor: 'end',
+          align: 'end',
+          font: { weight: 'bold', size: 12, lineHeight: 14 },
+          formatter: (value) => value
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8' },
+          grid: { color: '#334155' },
+          grace: '10',
+          title: {
+            display: true,
+            text: 'Record Count',
+            color: '#94a3b8',
+            font: { size: 12, weight: 'bold' }
+          }
+        },
+        y: {
+          ticks: { color: '#e2e8f0' },
+          grid: { display: false }
+        }
+      }
+    }
+  });
+
+  const leaderboardChart = new Chart(ctxLeaderboard, {
+    type: 'bar',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'On-time %',
+        data: [],
+        backgroundColor: '#fbbf24',
+        borderRadius: 6
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          color: '#ffffff',
+          anchor: 'end',
+          align: 'end',
+          font: { weight: 'bold', size: 12 },
+          formatter: (value, context) => {
+            const item = context.chart.data.rawObjects?.[context.dataIndex];
+            const rawDelay = item ? item.avg_delay_seconds : null;
+            const delayVal = (rawDelay !== null && rawDelay !== undefined) ? Number(rawDelay) : NaN;
+            return !isNaN(delayVal)
+              ? [`${value}%`, `${delayVal.toFixed(1)}s`]
+              : `${value}%`;
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8' },
+          grid: { color: '#334155' },
+          max: 100,
+          title: {
+            display: true,
+            text: 'On-time Percentage (%)',
+            color: '#94a3b8',
+            font: { size: 12, weight: 'bold' }
+          }
+        },
+        y: {
+          ticks: { color: '#e2e8f0' },
+          grid: { display: false }
+        }
+      }
+    }
+  });
+
+  async function refresh() {
+    try {
+      const res = await fetch(API_URL, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      chart.data.labels = data.map(d => d.station_name);
+      chart.data.datasets[0].data = data.map(d => d.record_count);
+      chart.update();
+
+      const lbRes = await fetch(LEADERBOARD_API_URL, { cache: 'no-store' });
+      if (!lbRes.ok) throw new Error(`HTTP ${lbRes.status}`);
+      const lbData = await lbRes.json();
+
+      leaderboardChart.data.rawObjects = lbData;
+      leaderboardChart.data.labels = lbData.map(d => d.station_name);
+      leaderboardChart.data.datasets[0].data = lbData.map(d => d.on_time_pct);
+      leaderboardChart.update();
+
+      statusEl.textContent = `Last update: ${new Date().toLocaleTimeString('en-GB')}`;
+      statusEl.classList.remove('error');
+    } catch (err) {
+      statusEl.textContent = `Fetch error: ${err.message}`;
+      statusEl.classList.add('error');
+    }
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_INTERVAL_MS);
+</script>
+</body>
+</html>
