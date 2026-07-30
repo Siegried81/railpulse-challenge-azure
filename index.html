@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,19 +7,27 @@
 </head>
 <body>
     <h1>RailPulse Liveboard Dashboard</h1>
-    <div id="dashboard-content">uploading data...</div>
+    <div id="dashboard-content">Loading data...</div>
 
     <script>
         fetch('https://railpulse-liveboard-func-flex311.azurewebsites.net/api/dashboard')
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('dashboard-content').innerHTML = 
-                    `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error("HTTP error: " + response.status);
+                }
+                return response.text();
+            })
+            .then(text => {
+                try {
+                    const data = JSON.parse(text);
+                    document.getElementById('dashboard-content').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                } catch (e) {
+                    document.getElementById('dashboard-content').innerHTML = `<pre>${text}</pre>`;
+                }
             })
             .catch(error => {
-                document.getElementById('dashboard-content').innerHTML = 
-                    "Erreur lors du chargement des données de l'API.";
-                console.error('Erreur:', error);
+                document.getElementById('dashboard-content').innerHTML = "Error loading data from the API.";
+                console.error('Error:', error);
             });
     </script>
 </body>
