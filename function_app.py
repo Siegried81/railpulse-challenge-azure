@@ -6,13 +6,17 @@ import requests
 import pyodbc
 import azure.functions as func
 
+# Initialize Azure Functions application instance
 app = func.FunctionApp()
 
+# API endpoint URLs for SNCB/NMBS GTFS-Realtime feeds
 TRIP_UPDATES_URL = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed/nmbssncb/rt/trip-update"
 ALERTS_URL = "https://api-management-discovery-production.azure-api.net/api/gtfs/feed/nmbssncb/rt/alert"
 
+# GTFS-Realtime schedule relationship code for canceled trips
 TRIP_SCHEDULE_RELATIONSHIP_CANCELED = 3  # 0=Scheduled, 1=Added, 2=Unscheduled, 3=Canceled
 
+# Major Belgian rail hubs tracked for network statistics
 MAJOR_HUBS = [
     "Bruxelles-Central",
     "Anvers-Central",
@@ -21,6 +25,7 @@ MAJOR_HUBS = [
     "Liège-Guillemins",
 ]
 
+# Common Cross-Origin Resource Sharing headers for HTTP responses
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
@@ -29,6 +34,7 @@ CORS_HEADERS = {
 
 
 def get_db_connection():
+    """Retrieve SQL connection string from environment variables and open a pyodbc connection."""
     connection_string = os.environ.get("SQL_CONNECTION_STRING")
     if not connection_string:
         raise RuntimeError(
@@ -39,13 +45,14 @@ def get_db_connection():
 
 
 def fetch_gtfs_rt_feed(url: str) -> dict:
-    """This provider serves GTFS-Realtime as JSON (not raw Protobuf)."""
+    """Fetch and return GTFS-Realtime data as JSON from the specified feed URL."""
     response = requests.get(url, timeout=15)
     response.raise_for_status()
     return response.json()
 
 
 def normalize_station_id(raw_stop_id: str) -> str:
+    """Normalize raw stop ID to match the station primary key format."""
     base_id = raw_stop_id.split("_")[0]
     return base_id[:20]
 
@@ -61,6 +68,7 @@ def load_known_station_ids(cursor) -> set:
 
 
 def upsert_vehicle(cursor, vehicle_id: str, vehicle_type: str, direction: str):
+    """Insert a new vehicle record or update an existing one safely in the database."""
     cursor.execute("""
         IF EXISTS (SELECT 1 FROM vehicles WHERE vehicle_id = ?)
             UPDATE vehicles 
@@ -74,8 +82,8 @@ def upsert_vehicle(cursor, vehicle_id: str, vehicle_type: str, direction: str):
 
 
 def insert_liveboard_record(cursor, conn, station_id, vehicle_id, platform,
-                             scheduled_time, delay_seconds, canceled, pulled_at):
-
+                            scheduled_time, delay_seconds, canceled, pulled_at):
+    """Insert a liveboard record, handling duplicate constraint violations gracefully via rollback."""
     try:
         cursor.execute("""
             INSERT INTO liveboard_records
@@ -91,6 +99,7 @@ def insert_liveboard_record(cursor, conn, station_id, vehicle_id, platform,
 
 
 def process_trip_updates(cursor, conn) -> int:
+    """Iterate through trip update entities from the GTFS-RT feed and ingest valid records."""
     feed = fetch_gtfs_rt_feed(TRIP_UPDATES_URL)
     pulled_at = datetime.datetime.now(datetime.timezone.utc)
     count = 0
@@ -178,6 +187,7 @@ def _json_response(payload, status_code: int = 200) -> func.HttpResponse:
 
 @app.route(route="fetch-liveboard", auth_level=func.AuthLevel.ANONYMOUS)
 def fetch_liveboard_http(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP endpoint to trigger manual execution of the GTFS-RT ingestion pipeline."""
     logging.info("HTTP trigger: fetching GTFS-RT trip updates")
     try:
         total = run_ingestion()
@@ -192,6 +202,7 @@ def fetch_liveboard_http(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=False)
 def fetch_liveboard_timer(mytimer: func.TimerRequest) -> None:
+    """Timer trigger executing the ingestion pipeline automatically every 15 minutes."""
     logging.info("Timer trigger: fetching GTFS-RT trip updates")
     try:
         total = run_ingestion()
@@ -202,6 +213,7 @@ def fetch_liveboard_timer(mytimer: func.TimerRequest) -> None:
 
 @app.route(route="station-stats", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "OPTIONS"])
 def station_stats_http(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP API endpoint returning the top 5 most active stations by record count."""
     logging.info("HTTP trigger: fetching top-5 stations by record count")
 
     if req.method == "OPTIONS":
