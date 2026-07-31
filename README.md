@@ -30,14 +30,8 @@ railpulse-challenge-azure/
 ├── .venv/                           # Python virtual environment (gitignored)
 ├── data/
 │   └── stops.txt                    # GTFS static feed
-├── images/                          # screenshots
-│   ├── Major_Hubs_Leaderboard.png   # live on-time leaderboard chart
-│   ├── Top_5_Most_Active_Stations.png  # live most-active-stations chart
-│   ├── portal_resources.png         # Azure Portal, provisioned resources
-│   ├── portal_count_stations.png    # Azure Portal, SQL Query Editor result
-│   ├── portal_LRS.png               # Azure Portal, Storage account redundancy (LRS)
-│   ├── portal_functions_list.png    # Azure Portal, deployed Functions list
-│   └── api_fetch_liveboard.png      # live /api/fetch-liveboard response
+├── images/                         
+│   └── screenshots (.png)
 ├── scripts/
 │   └── load_stations.py             # one-time / on-demand loader for the `stations` table
 ├── sql/
@@ -171,6 +165,8 @@ A few issues came up while building this and are worth documenting rather than g
 
 ![Storage account redundancy](images/portal_LRS.png)
 
+**Local backup via SSMS.** Since this runs on the Azure for Students $100 credit, I also connected to `db-railpulse` with SQL Server Management Studio and exported the `stations`, `vehicles`, and `liveboard_records` tables locally. That way, if the credit runs out and the Azure SQL instance becomes unreachable, I still have a snapshot of the data to fall back on for the write-up, demo and next sprint.
+
 ---
 
 ## Verification — actual results from Azure Portal
@@ -207,12 +203,7 @@ SELECT TOP 5 * FROM liveboard_records ORDER BY pulled_at DESC;
 
 ## Conclusion
 
-This challenge rebuilds my local SQLite/Streamlit RailPulse pipeline as a cloud-native ETL: an Azure Function ingesting the SNCB GTFS-Realtime feed every 15 minutes into a normalized Azure SQL schema, ready for a BI tool to plug into.
-
-`stations`, `vehicles`, and `liveboard_records` already hold over 1,856 stations and thousands of historical rows pulled automatically — a live, growing dataset rather than a one-off test.
-
-**What was delivered vs. what was asked**
-
-*Must-Have:* fully met — serverless Azure SQL with firewall configured, normalized schema (`stations`, `vehicles`, `liveboard_records`) with FK relationships, a Python Function App with an HTTP-triggered ingestion endpoint, and `SQL_CONNECTION_STRING` read exclusively via `os.environ`. Goes further than asked: ingestion covers the entire SNCB network (1,856 stations) rather than a single hub.
-
-*Nice-to-Have:* also fully met — a Timer trigger automates ingestion every 15 minutes; idempotency is handled via a `UNIQUE` constraint plus a caught-and-skipped rollback rather than a naive check-then-insert; multi-hub coverage is exceeded by full-network ingestion.
+* **Project Overview**: Rebuilds the local SQLite/Streamlit RailPulse pipeline into a cloud-native ETL using an Azure Function to ingest the SNCB GTFS-Realtime feed every 15 minutes into a normalized Azure SQL schema.
+* **Data Scale**: Contains over 1,856 stations and thousands of historical rows across `stations`, `vehicles`, and `liveboard_records` as a live, growing dataset.
+* **Must-Have Requirements**: Fully met through a serverless Azure SQL database with a firewall, a normalized schema with foreign keys, and a Python Function App with an HTTP-triggered ingestion endpoint reading connection strings via `os.environ`.
+* **Nice-to-Have Features**: Fully implemented with automated 15-minute timer triggers, unique-constraint idempotency with rollbacks, and full-network ingestion across all 1,856 SNCB stations.
