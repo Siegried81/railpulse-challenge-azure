@@ -30,13 +30,14 @@ railpulse-challenge-azure/
 ├── .venv/                           # Python virtual environment (gitignored)
 ├── data/
 │   └── stops.txt                    # GTFS static feed
-├── images/
-│   ├── Major_Hubs_Leaderboard.png   # screenshot: live on-time leaderboard chart
-│   ├── Top_5_Most_Active_Stations.png  # screenshot: live most-active-stations chart
-│   ├── portal_resources.png         # screenshot: Azure Portal, provisioned resources
-│   ├── portal_count_stations.png    # screenshot: Azure Portal, SQL Query Editor result
-│   ├── portal_LRS.png               # screenshot: Azure Portal, Storage account redundancy (LRS)
-│   └── api_fetch_liveboard.png      # screenshot: live /api/fetch-liveboard response
+├── images/                          # screenshots
+│   ├── Major_Hubs_Leaderboard.png   # live on-time leaderboard chart
+│   ├── Top_5_Most_Active_Stations.png  # live most-active-stations chart
+│   ├── portal_resources.png         # Azure Portal, provisioned resources
+│   ├── portal_count_stations.png    # Azure Portal, SQL Query Editor result
+│   ├── portal_LRS.png               # Azure Portal, Storage account redundancy (LRS)
+│   ├── portal_functions_list.png    # Azure Portal, deployed Functions list
+│   └── api_fetch_liveboard.png      # live /api/fetch-liveboard response
 ├── scripts/
 │   └── load_stations.py             # one-time / on-demand loader for the `stations` table
 ├── sql/
@@ -178,11 +179,15 @@ A few issues came up while building this and are worth documenting rather than g
 
 ![Azure resources](images/portal_resources.png)
 
+**Functions deployed** — all 5 triggers (HTTP + Timer) showing up correctly in the Function App:
+
+![Deployed Functions list](images/portal_functions_list.png)
+
 **Live ingestion endpoint check** — hitting `/api/fetch-liveboard` directly in the browser:
 
 ![Fetch-liveboard endpoint response](images/api_fetch_liveboard.png)
 
-→ `OK — 613 liveboard records ingested from GTFS-RT feed.`, confirming the ingestion pipeline runs end-to-end on the deployed Function App, not just locally.
+→ `OK — 613 records ingested`, confirming the ingestion pipeline runs end-to-end on the deployed Function App, not just locally.
 
 **SQL query checks** — run directly in the Azure SQL Query Editor:
 
@@ -211,5 +216,3 @@ This challenge rebuilds my local SQLite/Streamlit RailPulse pipeline as a cloud-
 *Must-Have:* fully met — serverless Azure SQL with firewall configured, normalized schema (`stations`, `vehicles`, `liveboard_records`) with FK relationships, a Python Function App with an HTTP-triggered ingestion endpoint, and `SQL_CONNECTION_STRING` read exclusively via `os.environ`. Goes further than asked: ingestion covers the entire SNCB network (1,856 stations) rather than a single hub.
 
 *Nice-to-Have:* also fully met — a Timer trigger automates ingestion every 15 minutes; idempotency is handled via a `UNIQUE` constraint plus a caught-and-skipped rollback rather than a naive check-then-insert; multi-hub coverage is exceeded by full-network ingestion.
-
-*Levels reached:* MVP (real-time data on Azure SQL), Level 2 (static + real-time tables unified in the same database), and Level 3 (the automated timer above) — all three. ✅
