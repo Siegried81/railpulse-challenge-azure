@@ -107,7 +107,7 @@ I added a `/api/dashboard` route that reads `station_stats_dashboard.html` off d
 
 | Trigger | Route | Behavior |
 |---|---|---|
-| HTTP (anonymous) | `GET /api/fetch-liveboard` | Runs one ingestion pass on demand, returns `OK — N liveboard records ingested from GTFS-RT feed.` |
+| HTTP (function key) | `POST /api/fetch-liveboard?code=<function key>` | Runs one ingestion pass on demand, returns `OK — N liveboard records ingested from GTFS-RT feed.` — N counts rows actually written, duplicates excluded. The key is in the portal under the function's **Function Keys**; the timer below needs none. |
 | HTTP (anonymous) | `GET /api/station-stats` | Returns the top-5 most active stations as JSON. |
 | HTTP (anonymous) | `GET /api/network-leaderboard` | Returns on-time % (and average delay) for five major hubs: Bruxelles-Central, Anvers-Central, Gand-Saint-Pierre, Charleroi-Central, Liège-Guillemins. |
 | HTTP (anonymous) | `GET /api/dashboard` | Serves `station_stats_dashboard.html` directly from the Function App. |
@@ -139,7 +139,8 @@ Both charts below update live every 30 seconds on the actual dashboard — these
 
 - I read `SQL_CONNECTION_STRING` via `os.environ` — I never hardcode it, in either `function_app.py` or `scripts/load_stations.py`. I configure it in the Function App's **Application Settings** (portal) / `local.settings.json` (gitignored) / a local PowerShell `$env:` variable when I run the loader script.
 - Azure SQL firewall: I allowed my local machine's IP and enabled **"Allow Azure services and resources to access this server"** so the Function App can reach the DB.
-- All HTTP routes are currently `AuthLevel.ANONYMOUS` with `Access-Control-Allow-Origin: *` — fine for moving fast during the challenge, not something I'd leave open in a production deployment.
+- The three read routes are `AuthLevel.ANONYMOUS` with `Access-Control-Allow-Origin: *`, which is what a public dashboard needs. The one route that **writes** (`fetch-liveboard`) requires the function key and accepts POST only: an anonymous GET that triggers a feed pull and inserts into Azure SQL is paid work anyone, including a link crawler, could start. Error responses carry a short reference instead of the driver's message; the full exception stays in the Function App logs under that reference.
+- A duplicate stop time within a pull is skipped by the INSERT itself (`WHERE NOT EXISTS` on the dedup key), never by `rollback()`: a rollback on the shared connection would undo every row the pull had already inserted, while the counter kept going. `tests/test_function_app.py` pins both, without Azure or an ODBC driver.
 
 ---
 
@@ -179,7 +180,7 @@ A few issues came up while building this and are worth documenting rather than g
 
 ![Deployed Functions list](images/portal_functions_list.png)
 
-**Live ingestion endpoint check** — hitting `/api/fetch-liveboard` directly in the browser:
+**Live ingestion endpoint check** — hitting `/api/fetch-liveboard` directly in the browser (taken when the route was still anonymous and accepted GET; it now needs `POST` with the function key):
 
 ![Fetch-liveboard endpoint response](images/api_fetch_liveboard.png)
 

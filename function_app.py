@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import datetime
+import uuid
 import requests
 import pyodbc
 import azure.functions as func
@@ -82,20 +83,39 @@ def upsert_vehicle(cursor, vehicle_id: str, vehicle_type: str, direction: str):
 
 
 def insert_liveboard_record(cursor, conn, station_id, vehicle_id, platform,
-                            scheduled_time, delay_seconds, canceled, pulled_at):
-    """Insert a liveboard record, handling duplicate constraint violations gracefully via rollback."""
+                            scheduled_time, delay_seconds, canceled, pulled_at) -> bool:
+    """Insert one liveboard record and report whether a row was actually written.
+
+    The duplicate check is part of the statement (`WHERE NOT EXISTS` on the
+    columns of UQ_liveboard_dedup) rather than a caught IntegrityError followed
+    by `conn.rollback()`. A rollback on the shared connection undoes every row
+    the current pull had inserted so far, not just the duplicate: one repeated
+    stop time could wipe a whole pull while the caller kept counting. The
+    IntegrityError branch stays only for the race where another run inserted
+    the same key between the check and the insert; it skips the row and leaves
+    the transaction alone.
+
+    `cursor.rowcount` is the truth about persistence, so the caller can count
+    rows written instead of rows attempted.
+    """
     try:
         cursor.execute("""
             INSERT INTO liveboard_records
                 (station_id, vehicle_id, platform, scheduled_time, delay_seconds, canceled, pulled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, station_id, vehicle_id, platform, scheduled_time, delay_seconds, canceled, pulled_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM liveboard_records
+                WHERE station_id = ? AND vehicle_id = ? AND scheduled_time = ? AND pulled_at = ?
+            )
+        """, station_id, vehicle_id, platform, scheduled_time, delay_seconds, canceled, pulled_at,
+             station_id, vehicle_id, scheduled_time, pulled_at)
+        return cursor.rowcount == 1
     except pyodbc.IntegrityError:
-        conn.rollback()
         logging.warning(
-            f"Duplicate entry within same pull, skipped: "
+            f"Duplicate entry skipped: "
             f"station={station_id}, vehicle={vehicle_id}, scheduled_time={scheduled_time}, pulled_at={pulled_at}"
         )
+        return False
 
 
 def process_trip_updates(cursor, conn) -> int:
@@ -148,11 +168,13 @@ def process_trip_updates(cursor, conn) -> int:
                 continue
             seen_keys.add(dedup_key)
 
-            insert_liveboard_record(
+            # Count rows persisted, not rows attempted: the response says
+            # "N records ingested" and that figure has to be the one in the table.
+            if insert_liveboard_record(
                 cursor, conn, station_id, vehicle_id, "",
                 scheduled_time, delay_seconds, canceled, pulled_at
-            )
-            count += 1
+            ):
+                count += 1
 
     return count
 
@@ -185,7 +207,26 @@ def _json_response(payload, status_code: int = 200) -> func.HttpResponse:
     )
 
 
-@app.route(route="fetch-liveboard", auth_level=func.AuthLevel.ANONYMOUS)
+def _log_failure(what: str, exc: Exception) -> str:
+    """Log the full exception server-side and return a correlation id for the client.
+
+    The raw exception text used to be the HTTP body. For a database error that
+    is the driver's message, which names the server, the table and sometimes
+    the failing value - useful to an operator reading the logs, not something
+    to hand to an anonymous caller. The id lets the two be matched.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logging.error(f"{what} failed [{correlation_id}]: {exc}")
+    return correlation_id
+
+
+# Writes need a key: the ingestion pulls the SNCB feed and inserts into Azure
+# SQL, so an anonymous route let anyone on the internet trigger paid work and
+# fill the table at will. FUNCTION level means the caller presents the
+# function key (`?code=...`); the timer trigger below needs no key and is how
+# ingestion normally runs. POST only, because a GET that writes is the request
+# a link preview or a crawler makes by accident.
+@app.route(route="fetch-liveboard", auth_level=func.AuthLevel.FUNCTION, methods=["POST"])
 def fetch_liveboard_http(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP endpoint to trigger manual execution of the GTFS-RT ingestion pipeline."""
     logging.info("HTTP trigger: fetching GTFS-RT trip updates")
@@ -196,8 +237,10 @@ def fetch_liveboard_http(req: func.HttpRequest) -> func.HttpResponse:
             status_code=200
         )
     except Exception as e:
-        logging.error(f"Ingestion failed: {e}")
-        return func.HttpResponse(f"Error: {e}", status_code=500)
+        correlation_id = _log_failure("Ingestion", e)
+        return func.HttpResponse(
+            f"Ingestion failed. Reference {correlation_id}.", status_code=500
+        )
 
 
 @app.timer_trigger(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=False)
@@ -235,8 +278,10 @@ def station_stats_http(req: func.HttpRequest) -> func.HttpResponse:
         cursor.close()
         return _json_response(result)
     except Exception as e:
-        logging.error(f"Station stats query failed: {e}")
-        return _json_response({"error": str(e)}, status_code=500)
+        correlation_id = _log_failure("Station stats query", e)
+        return _json_response(
+            {"error": "query failed", "reference": correlation_id}, status_code=500
+        )
     finally:
         if conn is not None:
             conn.close()
@@ -286,8 +331,10 @@ def network_leaderboard_http(req: func.HttpRequest) -> func.HttpResponse:
         ]
         return _json_response(result)
     except Exception as e:
-        logging.error(f"Leaderboard stats query failed: {e}")
-        return _json_response({"error": str(e)}, status_code=500)
+        correlation_id = _log_failure("Leaderboard stats query", e)
+        return _json_response(
+            {"error": "query failed", "reference": correlation_id}, status_code=500
+        )
     finally:
         if conn is not None:
             conn.close()
