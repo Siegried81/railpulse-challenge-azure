@@ -15,6 +15,7 @@ I built an automated cloud-native ETL pipeline that pulls real-time liveboard da
 - [Endpoints & viewing the dashboard](#endpoints--viewing-the-dashboard)
 - [Screenshots](#screenshots)
 - [Environment & security](#environment--security)
+- [Bugs encountered & fixes](#bugs-encountered--fixes)
 - [Cost-control configuration](#cost-control-configuration-azure-for-students-100-credit)
 - [Verification — actual results from Azure Portal](#verification--actual-results-from-azure-portal)
 - [Conclusion](#conclusion)
@@ -35,12 +36,12 @@ railpulse-challenge-azure/
 ├── scripts/
 │   └── load_stations.py             # one-time / on-demand loader for the `stations` table
 ├── sql/
-│   └── schema.sql                   # idempotent table + index definitions
+│   └── schema.sql                   # table (IF NOT EXISTS) + index definitions
 ├── .funcignore                      # excludes local-dev files from Azure Functions deployment
 ├── .gitignore
 ├── function_app.py                  # Azure Function App: HTTP + Timer triggers, serves the dashboard too
 ├── host.json                        # Azure Functions host configuration
-├── index.html                       # static landing page pointing to the GitHub Pages demo URL
+├── index.html                       # GitHub Pages entry page — embeds the Function App's /api/dashboard in an iframe
 ├── local.settings.json              # local-only env vars (gitignored!)
 ├── requirements.txt
 └── station_stats_dashboard.html     # dashboard page — reads live data straight from the deployed Function App
@@ -73,10 +74,10 @@ scripts/load_stations.py                   Azure Function App
 
 ## Database schema
 
-Defined in `sql/schema.sql`, created idempotently (`IF NOT EXISTS`) so it can be re-run safely without breaking an existing deployment.
+Defined in `sql/schema.sql`. The three tables are guarded by `IF NOT EXISTS`, so re-running the script never drops or recreates them; the `CREATE INDEX` statement is not guarded, so a re-run reports that the index already exists.
 
 - **`stations`** — static reference data from `stops.txt` (`station_id` PK). `wheelchair_boarding` is nullable and empty values stay `NULL` rather than `0`, preserving "no information" vs. "not accessible".
-- **`vehicles`** — one row per GTFS-RT `tripId` (PK). `vehicle_type`/`direction` are updated via `COALESCE(NULLIF(...))` on every pull so a blank incoming value never overwrites a known one.
+- **`vehicles`** — one row per GTFS-RT `tripId` (PK). `vehicle_type`/`direction` are updated via `COALESCE(NULLIF(...))` on every pull so a blank `direction` (or a `'NA'` `vehicle_type`) never overwrites a known one.
 - **`liveboard_records`** — the real-time history table. FKs to both `stations` and `vehicles`. `platform` is a placeholder (empty) — the trip-update feed doesn't expose it. `UQ_liveboard_dedup` on `(station_id, vehicle_id, scheduled_time, pulled_at)` is why each 15-minute pull inserts new rows instead of overwriting.
 
 **Constraints & indexes**
@@ -96,7 +97,7 @@ python scripts/load_stations.py data/stops.txt
 ```
 
 **2. Live ingestion (`function_app.py`)**
-`fetch_gtfs_rt_feed()` pulls the SNCB GTFS-Realtime **trip-update** feed. For each `tripUpdate`, I upsert the vehicle into `vehicles`, check each stop's normalized `stopId` against the known stations, then extract the departure time and delay, and insert into `liveboard_records`. 
+`fetch_gtfs_rt_feed()` pulls the SNCB GTFS-Realtime **trip-update** feed. For each `tripUpdate`, I upsert the vehicle into `vehicles`, check each stop's normalized `stopId` against the known stations, then extract the departure time and delay (falling back to arrival when there is no departure), skip any `(station, trip, scheduled_time)` already seen in the same pull, and insert into `liveboard_records`. 
 
 **3. Serving the dashboard from the same app (`dashboard_http`)**
 I added a `/api/dashboard` route that reads `station_stats_dashboard.html` off disk and returns it directly as `text/html` — a convenient way to view it without hosting the file anywhere else.
@@ -149,8 +150,8 @@ Both charts below update live every 30 seconds on the actual dashboard — these
 A few issues came up while building this and are worth documenting rather than glossing over:
 
 - **CORS blocked the dashboard from calling the API.** The dashboard (`station_stats_dashboard.html`) is served from a different origin (domain) than the Function App (GitHub Pages, or a local `python -m http.server`) so browser cross-origin requests to `/api/station-stats` and `/api/network-leaderboard` were blocked by default. Fixed by explicitly returning `Access-Control-Allow-Origin: *` on those HTTP-triggered functions.
-- **Blank values silently overwriting good data.** Early on, re-ingesting `vehicles` on every pull could overwrite a previously known `vehicle_type` or `direction` with an empty string whenever a later feed pull didn't include that field. Fixed with `COALESCE(NULLIF(...))` on upsert, so an empty incoming value never clobbers an existing real value.
-- **Duplicate rows within a single feed pull.** GTFS-RT occasionally repeats the same `(station_id, vehicle_id, scheduled_time)` combination inside one `stopTimeUpdate` batch, which violated `UQ_liveboard_dedup` and would otherwise crash the ingestion run. Fixed by catching the conflict, logging a warning, and issuing `conn.rollback()` so the rest of the batch still inserts.
+- **Blank values silently overwriting good data.** Early on, re-ingesting `vehicles` on every pull could overwrite a previously known `vehicle_type` or `direction` with an empty string whenever a later feed pull didn't include that field. Fixed with `COALESCE(NULLIF(...))` on upsert, so an empty `direction` (or an `'NA'` `vehicle_type`) never clobbers an existing real value.
+- **Duplicate rows within a single feed pull.** GTFS-RT occasionally repeats the same `(station_id, vehicle_id, scheduled_time)` combination inside one `stopTimeUpdate` batch, which violated `UQ_liveboard_dedup` and would otherwise crash the ingestion run. Fixed by skipping repeats in memory (`seen_keys`) before they reach the database, and by making the INSERT itself conditional (`WHERE NOT EXISTS` on the dedup key). An `IntegrityError` is only caught for the race where another run inserted the same key in between; it skips that row without a rollback, so the rest of the pull is kept, and the run counts rows actually written.
 - **Unnecessary per-row DB lookups.** Originally, checking whether a stop belonged to a known station meant one `SELECT` per `stopTimeUpdate`, which doesn't scale. Fixed by loading all known `station_id`s into a Python `set` once per run (`load_known_station_ids()`) and checking membership in memory instead.
 
 ---
@@ -184,7 +185,7 @@ A few issues came up while building this and are worth documenting rather than g
 
 ![Fetch-liveboard endpoint response](images/api_fetch_liveboard.png)
 
-→ `OK — 613 records ingested`, confirming the ingestion pipeline runs end-to-end on the deployed Function App, not just locally.
+→ `OK — 613 liveboard records ingested from GTFS-RT feed.`, confirming the ingestion pipeline runs end-to-end on the deployed Function App, not just locally.
 
 **SQL query checks** — run directly in the Azure SQL Query Editor:
 
@@ -205,6 +206,6 @@ SELECT TOP 5 * FROM liveboard_records ORDER BY pulled_at DESC;
 ## Conclusion
 
 * **Project Overview**: Rebuilds the local SQLite/Streamlit RailPulse pipeline into a cloud-native ETL using an Azure Function to ingest the SNCB GTFS-Realtime feed every 15 minutes into a normalized Azure SQL schema.
-* **Data Scale**: Contains over 1,856 stations and thousands of historical rows across `stations`, `vehicles`, and `liveboard_records` as a live, growing dataset.
+* **Data Scale**: 1,856 stations, and 980,868 `liveboard_records` rows (99,014 distinct stop events) collected by the 15-minute timer between 27 Jul and 7 Aug 2026.
 * **Must-Have Requirements**: Fully met through a serverless Azure SQL database with a firewall, a normalized schema with foreign keys, and a Python Function App with an HTTP-triggered ingestion endpoint reading connection strings via `os.environ`.
 * **Nice-to-Have Features**: Fully implemented with automated 15-minute timer triggers, unique-constraint idempotency with rollbacks, and full-network ingestion across all 1,856 SNCB stations.
