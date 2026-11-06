@@ -201,6 +201,13 @@ SELECT TOP 5 * FROM liveboard_records ORDER BY pulled_at DESC;
 ```
 → Rows accumulating steadily, with delays ranging across different stations and pull timestamps — confirming the timer trigger runs automatically every 15 minutes and history accumulates correctly.
 
+```sql
+SELECT COUNT(*) FROM [dbo].[liveboard_records] WHERE [delay_seconds] > 120;
+```
+→ **97,839 rows** with a delay over 2 minutes. That counts snapshot rows, not distinct stops: a late train is seen again on every 15-minute pull until it leaves, so this is out of the 980,868 rows, not the 99,014 stop events.
+
+![Rows delayed by more than 2 minutes](images/nb_trains_late.png)
+
 ---
 
 ## Conclusion
@@ -208,4 +215,4 @@ SELECT TOP 5 * FROM liveboard_records ORDER BY pulled_at DESC;
 * **Project Overview**: Rebuilds the local SQLite/Streamlit RailPulse pipeline into a cloud-native ETL using an Azure Function to ingest the SNCB GTFS-Realtime feed every 15 minutes into a normalized Azure SQL schema.
 * **Data Scale**: 1,856 stations, and 980,868 `liveboard_records` rows (99,014 distinct stop events) collected by the 15-minute timer between 27 Jul and 7 Aug 2026.
 * **Must-Have Requirements**: Fully met through a serverless Azure SQL database with a firewall, a normalized schema with foreign keys, and a Python Function App with an HTTP-triggered ingestion endpoint reading connection strings via `os.environ`.
-* **Nice-to-Have Features**: Fully implemented with automated 15-minute timer triggers, unique-constraint idempotency with rollbacks, and full-network ingestion across all 1,856 SNCB stations.
+* **Nice-to-Have Features**: Fully implemented with automated 15-minute timer triggers, unique-constraint idempotency (duplicates are skipped by the INSERT, without a rollback), and full-network ingestion across all 1,856 SNCB stations.
