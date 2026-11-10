@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import datetime
+import re
+import time
 import uuid
 import requests
 import pyodbc
@@ -43,6 +45,62 @@ def get_db_connection():
             "Configure it in Application Settings (portal) or local.settings.json (local)."
         )
     return pyodbc.connect(connection_string)
+
+
+# Azure SQL error numbers Microsoft lists as transient faults: the database is
+# briefly unavailable (reconfiguration, failover, resume from serverless
+# auto-pause, which answers the first login with 40613) or throttled. See
+# "List of transient fault error codes" in
+# https://learn.microsoft.com/azure/azure-sql/database/troubleshoot-common-errors-issues
+TRANSIENT_SQL_ERRORS = frozenset({615, 926, 4060, 4221, 40197, 40501, 40613, 49918, 49919, 49920})
+
+# Same page: wait 5 seconds before the first retry, then grow the delay
+# exponentially up to 60 seconds. Five attempts wait at most 5+10+20+40 = 75 s,
+# enough for a serverless resume (usually under a minute) and far inside the
+# 15-minute gap before the next timer run.
+SQL_RETRY_ATTEMPTS = 5
+SQL_RETRY_BASE_DELAY = 5.0
+SQL_RETRY_MAX_DELAY = 60.0
+
+_SQL_ERROR_NUMBER = re.compile(r"\((\d{3,5})\)")
+
+
+def sql_error_numbers(exc: Exception) -> set:
+    """The SQL Server error numbers in a pyodbc error.
+
+    pyodbc puts the native error number in the message, in parentheses after
+    the driver text, e.g. "[SQL Server]Database 'db' on server 's' is not
+    currently available. ... (40613) (SQLDriverConnect)".
+    """
+    return {int(n) for arg in exc.args for n in _SQL_ERROR_NUMBER.findall(str(arg))}
+
+
+def is_transient_sql_error(exc: Exception) -> bool:
+    return isinstance(exc, pyodbc.Error) and bool(sql_error_numbers(exc) & TRANSIENT_SQL_ERRORS)
+
+
+def with_sql_retry(operation, *, attempts: int = SQL_RETRY_ATTEMPTS,
+                   base_delay: float = SQL_RETRY_BASE_DELAY,
+                   max_delay: float = SQL_RETRY_MAX_DELAY, sleep=None):
+    """Run `operation()` and retry it on a transient Azure SQL error.
+
+    Exponential backoff capped at `max_delay`. Any other error, and the last
+    transient one, propagates unchanged. The operation must be safe to run
+    again: it opens its own connection, so a failed attempt's uncommitted
+    transaction dies with its connection.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt == attempts or not is_transient_sql_error(exc):
+                raise
+            delay = min(base_delay * 2 ** (attempt - 1), max_delay)
+            logging.warning(
+                f"Transient SQL error {sorted(sql_error_numbers(exc) & TRANSIENT_SQL_ERRORS)} "
+                f"on attempt {attempt}/{attempts}; retrying in {delay:.0f} s"
+            )
+            (sleep or time.sleep)(delay)
 
 
 def fetch_gtfs_rt_feed(url: str) -> dict:
@@ -118,10 +176,16 @@ def insert_liveboard_record(cursor, conn, station_id, vehicle_id, platform,
         return False
 
 
-def process_trip_updates(cursor, conn) -> int:
-    """Iterate through trip update entities from the GTFS-RT feed and ingest valid records."""
-    feed = fetch_gtfs_rt_feed(TRIP_UPDATES_URL)
-    pulled_at = datetime.datetime.now(datetime.timezone.utc)
+def process_trip_updates(cursor, conn, feed=None, pulled_at=None) -> int:
+    """Iterate through trip update entities from the GTFS-RT feed and ingest valid records.
+
+    `feed` and `pulled_at` are fetched and stamped here when not given;
+    run_ingestion passes them in so a retried write replays the same pull.
+    """
+    if feed is None:
+        feed = fetch_gtfs_rt_feed(TRIP_UPDATES_URL)
+    if pulled_at is None:
+        pulled_at = datetime.datetime.now(datetime.timezone.utc)
     count = 0
     seen_keys = set()
     known_station_ids = load_known_station_ids(cursor)
@@ -179,22 +243,48 @@ def process_trip_updates(cursor, conn) -> int:
     return count
 
 
-def run_ingestion() -> int:
+def run_ingestion(retry_attempts: int = SQL_RETRY_ATTEMPTS) -> int:
     """
     Shared by both the HTTP-triggered and timer-triggered ingestion entry
     points so the connect/commit/close lifecycle only exists in one place.
     The connection is always closed via `finally`, even if an exception
     happens mid-pull — otherwise a failed run leaks a SQL connection.
+
+    The feed is fetched and `pulled_at` stamped once, outside the retry, and
+    only the database part is retried on a transient Azure SQL error (40613
+    while a serverless database resumes, 40197 during a failover, ...). A
+    timer run that fails is not run again before the next schedule, so
+    before this, one unavailable database meant one lost pull.
+
+    `retry_attempts` caps the database attempts. The timer keeps the full 5.
+    The HTTP endpoint passes 2: the full backoff waits up to 75 s on top of
+    each connection timeout, which can get close to the 230 s limit Azure
+    puts on an HTTP request.
+
+    Retrying the write is safe because every statement is idempotent for the
+    same pull: upsert_vehicle is IF EXISTS UPDATE ELSE INSERT, and each
+    liveboard row is INSERT ... WHERE NOT EXISTS on (station, vehicle,
+    scheduled_time, pulled_at). Rows of a failed attempt that never committed
+    are rolled back with its connection; if the commit itself succeeded but
+    its acknowledgement was lost, the replay finds every row already there
+    and inserts nothing. Reusing the same `pulled_at` is what makes that
+    hold: a fresh timestamp would make every row new again.
     """
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        total = process_trip_updates(cursor, conn)
-        conn.commit()
-        cursor.close()
-        return total
-    finally:
-        conn.close()
+    feed = fetch_gtfs_rt_feed(TRIP_UPDATES_URL)
+    pulled_at = datetime.datetime.now(datetime.timezone.utc)
+
+    def write_pull() -> int:
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            total = process_trip_updates(cursor, conn, feed=feed, pulled_at=pulled_at)
+            conn.commit()
+            cursor.close()
+            return total
+        finally:
+            conn.close()
+
+    return with_sql_retry(write_pull, attempts=retry_attempts)
 
 
 def _json_response(payload, status_code: int = 200) -> func.HttpResponse:
@@ -231,7 +321,8 @@ def fetch_liveboard_http(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP endpoint to trigger manual execution of the GTFS-RT ingestion pipeline."""
     logging.info("HTTP trigger: fetching GTFS-RT trip updates")
     try:
-        total = run_ingestion()
+        # Two attempts only: a caller waits on this request (see run_ingestion).
+        total = run_ingestion(retry_attempts=2)
         return func.HttpResponse(
             f"OK — {total} liveboard records ingested from GTFS-RT feed.",
             status_code=200
